@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- tvOS 18 UI Kit "Chevron Stretched Up" (49.5 x 11.5 px at 2x): the hint above the dock that more is below. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="25dp"
+    android:height="6dp"
+    android:viewportWidth="49.5"
+    android:viewportHeight="11.5">
+    <path
+        android:pathData="M2,9.5L24.75,2L47.5,9.5"
+        android:strokeColor="#80FFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

@@ -8,7 +8,7 @@ import android.service.dreams.DreamService;
  */
 public class ClockDream extends DreamService {
 
-    private ClockScene scene;
+    private Scene scene;
 
     @Override
     public void onAttachedToWindow() {
@@ -16,8 +16,11 @@ public class ClockDream extends DreamService {
         setInteractive(false);   // any key wakes the TV back to where it was
         setFullscreen(true);
         setScreenBright(false);
-        setContentView(R.layout.dream_clock);
-        scene = new ClockScene(getWindow().getDecorView());
+        // tvOS shell: the wallpapers with the date and clock at the top; otherwise the drifting clock on black.
+        boolean rest = getResources().getBoolean(R.bool.tvos_shell)
+                && RestScene.wallpapers(getResources(), getPackageName()).length > 0;
+        setContentView(rest ? R.layout.dream_rest : R.layout.dream_clock);
+        scene = rest ? new RestScene(getWindow().getDecorView()) : new ClockScene(getWindow().getDecorView());
     }
 
     @Override

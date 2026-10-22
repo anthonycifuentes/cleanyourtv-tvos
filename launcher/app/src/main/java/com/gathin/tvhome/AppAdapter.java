@@ -57,10 +57,19 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         void onLibraryRequested();
         void onLibraryFocused();
         void onLibraryUp();
+
+        /** OK held on a tile; true when the launcher showed its own menu, false opens the app's info instead. */
+        default boolean onTileLongPress(int position) {
+            return false;
+        }
+
+        /** OK on the Explore tile (tvOS shell): open the pick its shelf shows. */
+        default void onExploreSelected() {
+        }
     }
 
     static final class Entry {
-        static final int APP = 0, HOME_SETTINGS = 1, CARD = 2, EMPTY = 3;
+        static final int APP = 0, HOME_SETTINGS = 1, CARD = 2, EMPTY = 3, EXPLORE = 4;
 
         final int kind;
         final String label;
@@ -89,7 +98,11 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         }
     }
 
-    static final float FOCUS_SCALE = 1.10f;
+    /**
+     * The focus zoom. The tvOS 18 UI Kit grows a focused 251x150 icon to 303x180 (x1.207); on a TV the lift reads as
+     * that much already at x1.15, without crowding the neighbours.
+     */
+    static final float FOCUS_SCALE = 1.15f, ADVANCED_FOCUS_SCALE = 1.15f;
     /** Design size of a tile (dp); tiles shrink from here when the columns don't fit, see tileWidthPx. */
     static final float DESIGN_W_DP = 180f, DESIGN_H_DP = 101f;
 
@@ -101,7 +114,9 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         int design = Math.round(DESIGN_W_DP * density);
         if (innerWidthPx <= 0 || columns <= 0) return design;
         int cell = innerWidthPx / columns;
-        int fit = (int) ((cell - 12 * density) / FOCUS_SCALE);
+        // Half the zoom's growth is room the focused tile takes from the gaps beside it, as on tvOS (a 251px icon
+        // in a 293px slot zooms to 303px), so the tiles fill their cells instead of leaving room for the whole zoom.
+        int fit = (int) ((cell - 12 * density) / ((1f + FOCUS_SCALE) / 2f));
         return Math.max(Math.round(80 * density), Math.min(design, fit));
     }
 
@@ -127,8 +142,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     static final float COMPACT_ITEM_EXTRA_DP = 4 + 4 + 4 + 20;
     static final float COMPACT_BOTTOM_ROOM_DP = 16;
 
-    /** item_app.xml: 8dp padding above and below, a 7dp gap and the 22dp name label under the tile. */
-    static final float ITEM_EXTRA_DP = 45;
+    /** item_app.xml: 8dp padding above and below, a 7dp gap and the 26dp name label under the tile. */
+    static final float ITEM_EXTRA_DP = 49;
     /** DockDecoration's offsets above and below the dock row. */
     static final float DOCK_EXTRA_DP = 6 + 12;
     /** Room kept under the last row rows_below_dock asks for (MainActivity places the dock with the same). */
@@ -272,6 +287,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                     appLabels.containsKey(pkg) ? appLabels.get(pkg) : String.valueOf(ri.loadLabel(pm)), pkg);
             if (!seen.add(pkg + '\n' + label)) continue;
             Drawable banner = bundledBanner(appBanners.get(pkg));
+            if (banner == null) banner = borrowedBanner(pm, appBanners.get(pkg));
             if (banner == null) banner = loadBanner(pm, ri);
             // The icon is only drawn (and sampled for the glow) when there is no banner, so a tile with a
             // banner skips loading and decoding it.
@@ -297,6 +313,12 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             if (ca != cb) return ca ? -1 : 1;
             return a.label.compareToIgnoreCase(b.label);
         });
+        // tvOS shell: Explore leads the dock, as Home does on tvOS, whatever order the apps were saved in.
+        if (explore) {
+            fresh.add(0, new Entry(Entry.EXPLORE, ctx.getString(R.string.explore),
+                    new ComponentName(ctx.getPackageName(), ctx.getPackageName() + ".Explore"),
+                    homeBanner(), null, null, 0xFF2A2A2E));
+        }
         // Retain the optional Default-home tile until dependent tile-ordering work is merged.
         if (showHomeSettings
                 && pm.resolveActivity(new Intent(Settings.ACTION_HOME_SETTINGS), 0) != null) {
@@ -316,11 +338,36 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         notifyDataSetChanged();
     }
 
+    /**
+     * The Home tile's picture: your own res/drawable-nodpi/banner_home.(png|jpg) when you added one (it is git-ignored,
+     * see docs/tvos-shell.md), else the plain dark tile with the sparkle.
+     */
+    private Drawable homeBanner() {
+        int id = ctx.getResources().getIdentifier("banner_home", "drawable", ctx.getPackageName());
+        return ctx.getDrawable(id != 0 ? id : R.drawable.banner_explore);
+    }
+
     /** A banner_* drawable bundled with the launcher, or null for none or a name that is not one. */
     private Drawable bundledBanner(String name) {
         if (name == null || !name.startsWith("banner_")) return null;
         int id = ctx.getResources().getIdentifier(name, "drawable", ctx.getPackageName());
         return id != 0 ? ctx.getDrawable(id) : null;
+    }
+
+    /**
+     * app_banners "package=app:other.package": the banner of another installed app, for a client that stands in for
+     * an official app (SmartTube showing YouTube's). Null when that app is missing or has no banner.
+     */
+    private Drawable borrowedBanner(PackageManager pm, String name) {
+        if (name == null || !name.startsWith("app:")) return null;
+        String other = name.substring(4);
+        try {
+            Intent i = pm.getLeanbackLaunchIntentForPackage(other);
+            Drawable d = i != null ? pm.getActivityBanner(i) : null;
+            return d != null ? d : pm.getApplicationBanner(other);
+        } catch (PackageManager.NameNotFoundException e) {
+            return null;
+        }
     }
 
     private Drawable loadBanner(PackageManager pm, ResolveInfo ri) {
@@ -392,7 +439,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             v.setPadding(v.getPaddingLeft(), pad, v.getPaddingRight(), pad);
         }
         name.setLayoutParams(nameLp);
-        return new Holder(v, listener, animations, advancedEffects, reducedMotion, restNameAlpha, focusOvershoot);
+        return new Holder(v, listener, animations, advancedEffects, reducedMotion, restNameAlpha, focusOvershoot,
+                dockSize, dockRestScale);
     }
 
     @Override
@@ -418,8 +466,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         h.name.setVisibility(dockRow && position < dockSize && restNameAlpha == 0f ? View.INVISIBLE : View.VISIBLE);
         boolean focused = h.card.isFocused();   // a rebind after reload() can hit the focused tile
         h.name.setAlpha(focused ? 1f : restNameAlpha);
-        h.card.setScaleX(focused && animations ? focusScale() : 1f);
-        h.card.setScaleY(focused && animations ? focusScale() : 1f);
+        h.card.setScaleX(focused && animations ? focusScaleAt(position) : restScaleAt(position));
+        h.card.setScaleY(focused && animations ? focusScaleAt(position) : restScaleAt(position));
         h.card.setTranslationY(focused && advancedEffects ? -4f * ctx.getResources().getDisplayMetrics().density : 0f);
         h.card.setTranslationZ(focused && advancedEffects ? 8f * ctx.getResources().getDisplayMetrics().density : 0f);
         h.banner.setScaleX(focused && advancedEffects ? 1.035f : 1f);
@@ -442,6 +490,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         }
         h.card.setOnClickListener(v -> launch(e));
         h.card.setOnLongClickListener(v -> {
+            int at = h.getBindingAdapterPosition();
+            if (at != RecyclerView.NO_POSITION && listener.onTileLongPress(at)) return true;
             Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + e.pkg));
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             try {
@@ -454,6 +504,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
     /** Opens the tile's activity by explicit component, with no extras: a card can name nothing else. */
     private void launch(Entry e) {
+        if (e.kind == Entry.EXPLORE) {
+            if (listener != null) listener.onExploreSelected();
+            return;
+        }
         if (e.kind == Entry.HOME_SETTINGS) {
             ctx.startActivity(new Intent(ctx, HomeSettingsActivity.class)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
@@ -514,6 +568,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
      * the owner moved into the dock stays there (#499); else a dock_apps entry.
      */
     private boolean isDocked(Entry e) {
+        if (e.kind == Entry.EXPLORE) return true;
         if (savedDocked < 0) return favourites.contains(e.pkg);
         Integer rank = savedRanks.get(e.component.flattenToShortString());
         return rank != null && rank < savedDocked;
@@ -584,6 +639,17 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         return position >= 0 && position < items.size() ? items.get(position).label : "";
     }
 
+    /** The Explore tile (tvOS shell, with a TMDB key): first in the dock. Takes effect at the next reload(). */
+    private boolean explore;
+
+    void setExplore(boolean on) {
+        explore = on;
+    }
+
+    boolean isExploreAt(int position) {
+        return explore && position >= 0 && position < items.size() && items.get(position).kind == Entry.EXPLORE;
+    }
+
     String packageAt(int position) {
         return position >= 0 && position < items.size() ? items.get(position).pkg : null;
     }
@@ -595,8 +661,28 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         return e.banner != null ? e.banner : e.icon;
     }
 
+    /**
+     * tvOS shell: dock icons rest a little smaller than grid icons and zoom by the same factor, so a focused dock icon
+     * grows as much as a grid one and still stays inside the band, as on tvOS. 0 keeps dock and grid alike.
+     */
+    private float dockRestScale;
+
+    void setDockRestScale(float scale) {
+        dockRestScale = scale;
+    }
+
+    /** A tile's scale at rest: the dock's on the tvOS shell, 1 otherwise. */
+    float restScaleAt(int position) {
+        return dockRestScale > 0 && position >= 0 && position < dockSize ? dockRestScale : 1f;
+    }
+
+    /** The scale of a focused tile at this position: its rest scale times the focus zoom. */
+    float focusScaleAt(int position) {
+        return restScaleAt(position) * focusScale();
+    }
+
     float focusScale() {
-        return !animations ? 1f : advancedEffects ? 1.12f : 1.10f;
+        return !animations ? 1f : advancedEffects ? ADVANCED_FOCUS_SCALE : FOCUS_SCALE;
     }
 
     /** A vivid colour sampled from the app's banner (or icon), cached per entry; a card's accent when it set one. */
@@ -652,9 +738,12 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         return Color.HSVToColor(hsv);
     }
 
-    /** Corner radius for a tile of this width: 16dp at the design width, proportionally less when smaller. */
+    /**
+     * Corner radius for a tile of this width: the tvOS 18 UI Kit's 30px on a 251px icon (12% of the width),
+     * 21.5dp at the design width and proportionally less when smaller.
+     */
     static float cornerRadius(int tileWidthPx, float density) {
-        return 16f * density * Math.min(1f, tileWidthPx / (DESIGN_W_DP * density));
+        return 21.5f * density * Math.min(1f, tileWidthPx / (DESIGN_W_DP * density));
     }
 
     static final class Holder extends RecyclerView.ViewHolder {
@@ -671,9 +760,12 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         /** Alpha of the name while the tile is not focused (always_show_names). */
         final float restNameAlpha;
         final boolean overshoot;
+        /** The dock's size and its tiles' rest scale (setDockRestScale), 0 when the dock rests like the grid. */
+        final int dockSize;
+        final float dockScale;
 
         Holder(View v, TileListener listener, boolean animations, boolean advancedEffects,
-               boolean reducedMotion, float restNameAlpha, boolean overshoot) {
+               boolean reducedMotion, float restNameAlpha, boolean overshoot, int dockSize, float dockScale) {
             super(v);
             card = v.findViewById(R.id.card);
             cardBackground = card.getBackground();
@@ -686,6 +778,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             this.reducedMotion = reducedMotion;
             this.restNameAlpha = restNameAlpha;
             this.overshoot = overshoot;
+            this.dockSize = dockSize;
+            this.dockScale = dockScale;
 
             final float density = v.getResources().getDisplayMetrics().density;
             card.setOutlineProvider(new ViewOutlineProvider() {
@@ -709,11 +803,15 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                 view.animate().cancel();
                 banner.animate().cancel();
                 name.animate().cancel();
-                float scale = !animations ? 1f : advancedEffects ? 1.12f : 1.10f;
-                float s = focused ? scale : 1f;
+                int at = getBindingAdapterPosition();
+                boolean inDock = dockScale > 0 && at >= 0 && at < dockSize;
+                float rest = inDock ? dockScale : 1f;
+                float scale = !animations ? 1f : advancedEffects ? ADVANCED_FOCUS_SCALE : FOCUS_SCALE;
+                float s = focused ? rest * scale : rest;
+                boolean lift = focused && advancedEffects && !inDock;
                 if (!animations) {
-                    view.setScaleX(1f);
-                    view.setScaleY(1f);
+                    view.setScaleX(rest);
+                    view.setScaleY(rest);
                     view.setTranslationY(0f);
                     view.setTranslationZ(0f);
                     banner.setScaleX(1f);
@@ -724,7 +822,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                     // A short zoom with no hardware layer: building a layer for so short an animation costs more
                     // frames than it saves. The name just appears instead of fading.
                     view.animate().scaleX(s).scaleY(s)
-                            .translationY(focused && advancedEffects ? -4f * density : 0f)
+                            .translationY(lift ? -4f * density : 0f)
                             .translationZ(focused && advancedEffects ? 8f * density : 0f)
                             .setDuration(focused ? Motion.REDUCED_MS : 60)
                             .setInterpolator(new DecelerateInterpolator())
@@ -736,7 +834,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                     if (focused) name.setTranslationY(density * 4f);
                 } else {
                     view.animate().scaleX(s).scaleY(s)
-                            .translationY(focused && advancedEffects ? -4f * density : 0f)
+                            .translationY(lift ? -4f * density : 0f)
                             .translationZ(focused && advancedEffects ? 8f * density : 0f)
                             .setDuration(advancedEffects ? (focused ? 220 : 170) : (focused ? 260 : 180))
                             .setInterpolator(focused && !overshoot ? new DecelerateInterpolator(1.5f)
@@ -746,9 +844,15 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                         banner.animate().scaleX(focused ? 1.035f : 1f).scaleY(focused ? 1.035f : 1f)
                                 .setDuration(280).start();
                     }
-                    name.animate().alpha(focused ? 1f : restNameAlpha)
-                            .translationY(focused ? density * 4f : -density * 6f)
-                            .setDuration(220).start();
+                    if (dockScale > 0) {
+                        // tvOS shell: the name just appears under the icon, a quick fade with no slide.
+                        name.setTranslationY(-density * 3f);   // close under the zoomed icon, as on tvOS
+                        name.animate().alpha(focused ? 1f : restNameAlpha).setDuration(focused ? 90 : 70).start();
+                    } else {
+                        name.animate().alpha(focused ? 1f : restNameAlpha)
+                                .translationY(focused ? density * 4f : -density * 6f)
+                                .setDuration(220).start();
+                    }
                 }
                 int pos = getBindingAdapterPosition();
                 if (focused && listener != null && pos != RecyclerView.NO_POSITION) {

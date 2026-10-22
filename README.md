@@ -28,6 +28,10 @@ It reached 7.4M views, people started doing the same to their own TVs, and their
 the lists here: 170+ TV models from 200+ contributors in four days. The repo was called tv-vibehack
 until the 19th; old links work.
 
+> **This fork** adds a **tvOS shell**: Top Shelf previews from your apps, a Liquid Glass dock and Control Center, an
+> Explore tab with TMDB picks, and a wallpaper screensaver. See [docs/tvos-shell.md](docs/tvos-shell.md). Based on
+> [Gathin23/cleanyourtv](https://github.com/Gathin23/cleanyourtv) (MIT).
+
 ## How it works
 
 Android TVs have the same debug bridge as Android phones. Switch on USB debugging in the TV's
@@ -297,6 +301,7 @@ BYINTEK, JMGO, Portronics, Stellamore, Wanbo and XGIMI projectors
 | Xiaomi MiTV-AXSO0 (dangal; Mi TV 4C Pro 2019 / 4A Pro) | Android TV 9 |
 | Xiaomi MiTV-AXSO2 (dangalUHD, India, 2 GB) | Android TV 9 |
 | Xiaomi TV S Mini LED 75 2025 (MiTV-MOEU0, ladybird, MediaTek) | Google TV 14 |
+| Xiaomi Mi TV 50" (MiTV-MOOQ2, croods, MediaTek) | Android TV 11 |
 | Xiaomi MiTV-MOOR2 (venom, MediaTek) | Google TV 11 |
 | Xiaomi MiTV-MOSR4 (irobot, MediaTek) | Google TV 11 |
 | Xiaomi MiTV-MSSP0 / Xiaomi Mi TV 4A 32 (amelie), firmware PI.5926 | Android TV 9 |

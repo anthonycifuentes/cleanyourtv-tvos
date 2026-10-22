@@ -13,15 +13,18 @@ import android.view.View;
  */
 public class ClockActivity extends Activity {
 
-    private ClockScene scene;
+    private Scene scene;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(R.layout.dream_clock);
+        // tvOS shell: the wallpapers with the date and clock at the top; otherwise the drifting clock on black.
+        boolean rest = getResources().getBoolean(R.bool.tvos_shell)
+                && RestScene.wallpapers(getResources(), getPackageName()).length > 0;
+        setContentView(rest ? R.layout.dream_rest : R.layout.dream_clock);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE);
-        scene = new ClockScene(getWindow().getDecorView());
+        scene = rest ? new RestScene(getWindow().getDecorView()) : new ClockScene(getWindow().getDecorView());
     }
 
     @Override

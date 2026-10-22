@@ -101,4 +101,24 @@
     <string name="race_live">%1$s · en directo</string>
     <string name="race_finished">Bandera a cuadros</string>
     <string name="last_opened">Abierta por última vez %1$s</string>
+    <string name="control_center">Centro de control</string>
+    <string name="cc_sound">Sonido</string>
+    <string name="cc_search">Buscar</string>
+    <string name="cc_screensaver">Salvapantallas</string>
+    <string name="cc_picture_hint">Modos</string>
+    <string name="cc_sound_hint">Audio</string>
+    <string name="cc_settings_hint">Todos los ajustes</string>
+    <string name="cc_appearance">Apariencia</string>
+    <string name="cc_dark">Oscuro</string>
+    <string name="cc_light">Claro</string>
+    <string name="tile_move">Mover</string>
+    <string name="tile_app_info">Información de la app</string>
+    <string name="rest_date_format" translatable="false">EEEE, d \'de\' MMMM</string>
+    <string name="explore">Explorar</string>
+    <string name="explore_movies">Películas</string>
+    <string name="explore_shows">Series</string>
+    <string name="explore_movie">Película</string>
+    <string name="explore_show">Serie</string>
+    <string name="explore_on">En %1$s</string>
+    <string name="shelf_watch_on">OK para ver en %1$s</string>
 </resources>

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- tvOS shell screensaver (RestScene): a wallpaper full screen, the date and a large clock at the top centre, as the
+     macOS 27 lock screen lays them out. Two wallpaper views so a new picture can fade in over the last one. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FF000000">
+
+    <ImageView
+        android:id="@+id/restBack"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:importantForAccessibility="no" />
+
+    <ImageView
+        android:id="@+id/restFront"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:alpha="0"
+        android:importantForAccessibility="no" />
+
+    <!-- A soft shade at the top so the clock reads over a bright sky. -->
+    <View
+        android:id="@+id/restShade"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no" />
+
+    <LinearLayout
+        android:id="@+id/restContent"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal|top"
+        android:layout_marginTop="58dp"
+        android:gravity="center_horizontal"
+        android:orientation="vertical">
+
+        <TextClock
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:format12Hour="@string/rest_date_format"
+            android:format24Hour="@string/rest_date_format"
+            android:textColor="#D9FFFFFF"
+            android:textSize="17sp"
+            android:fontFamily="@font/outfit_medium"
+            android:shadowColor="#66000000"
+            android:shadowRadius="8"
+            android:shadowDy="1" />
+
+        <TextClock
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:format12Hour="h:mm"
+            android:format24Hour="H:mm"
+            android:textColor="#E6FFFFFF"
+            android:layout_marginTop="-12dp"
+            android:textSize="96sp"
+            android:fontFamily="@font/outfit_medium"
+            android:letterSpacing="-0.02"
+            android:includeFontPadding="false"
+            android:shadowColor="#59000000"
+            android:shadowRadius="14"
+            android:shadowDy="2" />
+    </LinearLayout>
+</FrameLayout>

@@ -140,4 +140,27 @@
     <!-- Cinematic top shelf (cinematic_home): the line under the focused dock app's name; %1$s is when it was
          last opened, e.g. "5 minutes ago" or "yesterday, 9:40 pm". -->
     <string name="last_opened">Last opened %1$s</string>
+    <!-- tvOS shell: Control Center, opened from the clock pill at the top right. -->
+    <string name="control_center">Control Center</string>
+    <string name="cc_sound">Sound</string>
+    <string name="cc_search">Search</string>
+    <string name="cc_screensaver">Screensaver</string>
+    <string name="cc_picture_hint">Modes</string>
+    <string name="cc_sound_hint">Audio</string>
+    <string name="cc_settings_hint">All settings</string>
+    <string name="cc_appearance">Appearance</string>
+    <string name="cc_dark">Dark</string>
+    <string name="cc_light">Light</string>
+    <string name="tile_move">Move</string>
+    <string name="tile_app_info">App info</string>
+    <!-- tvOS shell screensaver: the date above the large clock, as the macOS lock screen shows it. -->
+    <string name="rest_date_format" translatable="false">EEEE, MMMM d</string>
+    <!-- tvOS shell Explore shelf (TmdbPicks). -->
+    <string name="explore">Explore</string>
+    <string name="explore_movies">Movies</string>
+    <string name="explore_shows">Shows</string>
+    <string name="explore_movie">Movie</string>
+    <string name="explore_show">Series</string>
+    <string name="explore_on">On %1$s</string>
+    <string name="shelf_watch_on">OK to watch on %1$s</string>
 </resources>

@@ -13,6 +13,17 @@ android {
         targetSdk 34
         versionCode 6
         versionName '2.5'
+        // tvOS shell Explore shelf: your own TMDB key from launcher/tmdb.properties (git-ignored). Empty: no Explore.
+        def tmdb = new Properties()
+        def tmdbFile = rootProject.file('tmdb.properties')
+        if (tmdbFile.exists()) tmdbFile.withInputStream { tmdb.load(it) }
+        buildConfigField 'String', 'TMDB_TOKEN', '"' + tmdb.getProperty('tmdb_token', '').trim() + '"'
+        buildConfigField 'String', 'TMDB_REGION', '"' + tmdb.getProperty('tmdb_region', 'US').trim() + '"'
+        buildConfigField 'String', 'TMDB_LANGUAGE', '"' + tmdb.getProperty('tmdb_language', 'en-US').trim() + '"'
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {

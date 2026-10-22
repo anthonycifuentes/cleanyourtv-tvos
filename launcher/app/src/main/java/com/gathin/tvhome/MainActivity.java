@@ -15,6 +15,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.ResolveInfo;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
@@ -142,6 +143,67 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private static final float HERO_ART_ALPHA = 0.5f;
     /** Softened artwork per app (HeroArt, about 5 KB each), made the first time its dock tile is focused. */
     private final Map<String, Bitmap> heroArtCache = new HashMap<>();
+    /** tvOS shell (config.xml tvos_shell): the Top Shelf artwork apps publish, behind the dock. */
+    private TopShelf topShelf;
+    /** The dock band (dock_row), which the tvOS shell draws as Liquid Glass over the shelf's blurred picture. */
+    private DockDecoration dockDecoration;
+    private static final String TVOS_PREFS = "tvos_shell", PREF_LIGHT = "light";
+    private boolean tvosShell;
+    /** tvOS shell appearance, chosen in Control Center: light frosted glass instead of smoked glass. */
+    private boolean lightMode;
+    /** tvOS shell: the clock pill at the top right that opens Control Center, and the chevron above the dock. */
+    private View clockPill;
+    private ImageView chevron;
+    /** The Top Shelf picture on screen (sharp, or null while the softened app artwork stands in) and whose it is. */
+    private Bitmap shelfPicture;
+    private String shelfPictureKey;
+    /**
+     * Apps publish no preview video to a third-party launcher, so the shelf moves instead: the picture drifts in a
+     * slow zoom (Ken Burns, a GPU transform of one texture) and every SHELF_CYCLE_MS the next program the app
+     * publishes fades in.
+     */
+    private static final long SHELF_CYCLE_MS = 9_000L;
+    /** The Explore tile's TMDB picks (null without a key), the tab shown and each tab's picks, in shelf order. */
+    private TmdbPicks picks;
+    private int exploreTab;
+    @SuppressWarnings("unchecked")
+    private final List<TmdbPicks.Pick>[] exploreLists = new List[]{Collections.emptyList(), Collections.emptyList(),
+            Collections.emptyList()};
+    /** Explore's info over the shelf: the tabs, the title's logo (or its name), a meta line and the synopsis. */
+    private LinearLayout exploreInfo;
+    private TextView[] exploreTabs;
+    private ImageView exploreLogo;
+    private TextView exploreTitle, exploreMeta, exploreOverview;
+    private String exploreLogoUrl;
+    /**
+     * Explore's carousel (Up from the Explore tile): the tab's picks as cards, the focused one wide (its backdrop, 16:9)
+     * and the others narrow (their posters), with the name under each and kind, year and app under the focused one.
+     * While it has focus, the screen behind is the focused pick's picture blurred, as under the app grid.
+     */
+    private LinearLayout carousel;
+    private boolean inCarousel;
+    /**
+     * Shelf focus (tvOS: Up from a dock app): the dock slides away and the Top Shelf's program has focus; OK opens it in
+     * its app, Left and Right step through the app's programs, Up goes on to the clock pill, Down or Back returns.
+     */
+    private boolean shelfMode;
+    private View shelfFocus;
+    private TextView shelfHint;
+    private int carouselFocus;
+    private static final float CARD_H = 196, CARD_WIDE = 348, CARD_NARROW = 132, CARD_GAP = 18;
+    /** The cards' decoded pictures by address (a tab's six), so switching tabs or coming back decodes nothing. */
+    private final Map<String, Bitmap> cardArt = new java.util.LinkedHashMap<String, Bitmap>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Bitmap> eldest) {
+            return size() > 18;
+        }
+    };
+    private String shelfPkg;
+    private int shelfIndex;
+    private android.animation.Animator kenBurns;
+    private final Runnable shelfCycle = this::nextShelfProgram;
+    /** The grid's backdrop: each Top Shelf picture reduced like HeroArt, by the picture's key. */
+    private final Map<String, Bitmap> shelfBlurCache = new HashMap<>();
     /** The app whose artwork heroArt shows, so focusing it again only fades it back in. */
     private String heroArtKey;
     /** The focus glow's colour while the cinematic shelf tints it, 0 for plain white glass. */
@@ -378,8 +440,23 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         heroMeta = findViewById(R.id.heroMeta);
         heroDots = findViewById(R.id.heroDots);
         heroArt = findViewById(R.id.heroArt);
-        cinematic = cfg.cinematicHome;
+        tvosShell = getResources().getBoolean(R.bool.tvos_shell);
+        cinematic = cfg.cinematicHome || tvosShell;
+        if (tvosShell) {
+            // tvOS shows the artwork as it is: no glow in the app's colour washing over it, and no glass slab over the
+            // focused icon, which lifts and catches the light instead.
+            ambientGlow = false;
+            ambient.setVisibility(View.GONE);
+            // No highlight travels between icons at all: the focused icon's zoom and elevation shadow are the focus.
+            glass.setPlain(true);
+            glass.setVisibility(View.GONE);
+            lightMode = getSharedPreferences(TVOS_PREFS, MODE_PRIVATE).getBoolean(PREF_LIGHT, false);
+        }
         glowStyle = cfg.glowStyle;
+        if (tvosShell) {
+            topShelf = new TopShelf(this);
+            topShelf.refresh(this::onTopShelfLoaded);
+        }
         if (cinematic) setUpCinematicShelf();
         // dock_title false: the name above the dock (and the cinematic lines under it) never shows; the glow
         // still follows the dock.
@@ -464,13 +541,22 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             public void onChildViewDetachedFromWindow(@NonNull View v) {
             }
         });
-        if (dockRow) grid.addItemDecoration(new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames, cfg.dockOpacity, cfg.dockGlass));
+        if (dockRow) grid.addItemDecoration(dockDecoration = new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames, cfg.dockOpacity,
+                cfg.dockGlass));
         // Reduced motion: the tiles are simply there, with no entrance (reloadApps skips it there too).
         if (animations && !reducedMotion) {
             grid.setLayoutAnimation(new LayoutAnimationController(
                     AnimationUtils.loadAnimation(this, R.anim.tile_enter), 0.06f));
         }
         adapter = new AppAdapter(this, this, COLUMNS, cfg);
+        // tvOS: dock icons rest at 90% of a grid icon, so their focus zoom stays inside the band.
+        if (tvosShell) adapter.setDockRestScale(0.9f);
+        if (tvosShell && topShelf != null && TmdbPicks.enabled()) {
+            picks = new TmdbPicks(this);
+            adapter.setExplore(true);
+            setUpExploreInfo();
+            picks.refresh(this::onPicksLoaded);
+        }
         dockApps = cfg.dockApps;
         fillDockLeavesSlots = !cfg.fillDock;
         Order savedOrder = Order.load(Order.file(this));
@@ -486,12 +572,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             int inner = (r - l) - grid.getPaddingLeft() - grid.getPaddingRight();
             int tileW = AppAdapter.tileWidthPx(inner, h, COLUMNS, rowsBelowDock, cfg.dockTitle, cfg.dockRow, density);
             int itemH = AppAdapter.itemHeightPx(AppAdapter.tileHeightPx(tileW), density);
-            int dockRow = itemH + (int) (AppAdapter.DOCK_EXTRA_DP * density);   // item height plus DockDecoration offsets
+            float dockExtra = dockDecoration != null ? 6 + dockDecoration.bottomDp : AppAdapter.DOCK_EXTRA_DP;
+            int dockRow = itemH + (int) (dockExtra * density);   // item height plus DockDecoration offsets
             int gridRows = itemH * rowsBelowDock;
             // Keep the hero below the header when the library is enabled on a short screen,
             // even when the theme requests an extra visible row below the dock.
             int shelfClearance = cfg.appLibrary ? hero.getMeasuredHeight() + (int) (40 * density) : 0;
-            int want = Math.max(shelfClearance, h - dockRow - gridRows - (int) (AppAdapter.BOTTOM_ROOM_DP * density));
+            // tvOS shell: the dock sits lower, close to the bottom edge with the next row just peeking, as on tvOS.
+            float bottomRoom = tvosShell ? 22 : AppAdapter.BOTTOM_ROOM_DP;   // the next row peeks 14dp
+            int want = Math.max(shelfClearance, h - dockRow - gridRows - (int) (bottomRoom * density));
             // Where the rows cannot fit even at the smallest tile (3 rows with the title on), the title keeps its
             // room above the dock and the last rows run off the bottom instead of the title drawing over the clock.
             if (MainActivity.this.dockRow && cfg.dockTitle && rowsBelowDock > 0) want = Math.max(want, (int) (AppAdapter.TITLE_ROOM_DP * density));
@@ -603,6 +692,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             }
         }
         if (festive) applyFestiveSkin((TextView) btnInputs, (TextView) btnSettings);
+        if (tvosShell) setUpTvosHeader();
+        if (tvosShell && dockDecoration != null) dockDecoration.setGlass(lightMode);
 
         // Hide the glass when focus leaves the tiles.
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
@@ -677,6 +768,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     protected void onResume() {
         super.onResume();
+        if (picks != null) {
+            onPicksLoaded();                 // the hour may have changed: this hour's three
+            picks.refresh(this::onPicksLoaded);
+        }
         // A festival that started or ended while Home was in the background: rebuild with or without it.
         if (festive != festival.active(LocalDate.now())) {
             recreate();
@@ -882,6 +977,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (topShelf != null) topShelf.shutdown();
+        if (picks != null) picks.shutdown();
         wallpaperPlayer.close();
         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
         TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
@@ -1221,6 +1318,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override
     public void onTileFocused(int position, View card) {
+        if (inCarousel) leaveCarousel();
+        if (shelfMode) leaveShelfMode();
         lastFocused = position;
         lastFocusedKey = adapter.keyAt(position);
         // Focus restored before the first layout (cold start): the tile has no size yet, and the glass
@@ -1236,11 +1335,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         r.set(0, 0, card.getWidth(), card.getHeight());
         root.offsetDescendantRectToMyCoords(card, r);
         float pad = 6f * density;        // matches GlassView's glow inset
-        float scale = adapter.focusScale();
+        float scale = adapter.focusScaleAt(position);
         float w = card.getWidth() * scale + 2 * pad;
         float h = card.getHeight() * scale + 2 * pad;
         float x = r.exactCenterX() - w / 2f;
-        float y = r.exactCenterY() - h / 2f - (advancedEffects ? 4f * density : 0f);
+        boolean lifted = advancedEffects && !(tvosShell && position < COLUMNS);   // dock icons do not lift on tvOS
+        float y = r.exactCenterY() - h / 2f - (lifted ? 4f * density : 0f);
 
         ViewGroup.LayoutParams lp = glass.getLayoutParams();
         if (lp.width != (int) w || lp.height != (int) h || card.getWidth() != glassCardW) {
@@ -1254,7 +1354,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         glassTargetX = x;
         glassTargetY = y;
         // Cinematic shelf: the highlight glows in the dock app's colour, plain white in the grid. app_glow: every tile.
-        boolean coloured = (appGlow || cinematic && position < COLUMNS) && !festive;
+        // tvOS shell: every focused icon gets its faint halo in its own colour (GlassView plain).
+        boolean coloured = (appGlow || tvosShell || cinematic && position < COLUMNS) && !festive;
         int accent = coloured ? adapter.ambientColorAt(position) : 0;
         if ((cinematic || appGlow) && !festive && accent != glassAccent) {
             glassAccent = accent;
@@ -1295,8 +1396,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             // fade out left the grid on plain black.
             showGlowOnly(position);
             // Scroll just enough so the whole glass (not only the tile) is visible.
-            revealRect.set(0, -(int) pad * 2, item.getWidth(), item.getHeight() + (int) pad);
-            grid.requestChildRectangleOnScreen(item, revealRect, reducedMotion);
+            Runnable reveal = () -> {
+                revealRect.set(0, -(int) pad * 2, item.getWidth(), item.getHeight() + (int) pad);
+                grid.requestChildRectangleOnScreen(item, revealRect, reducedMotion);
+            };
+            // tvOS: a frame later, once RecyclerView's own scroll to the focused tile has been issued, so this one
+            // replaces it instead of being cut short by it.
+            if (tvosShell) grid.post(() -> {
+                if (!parkDockAtTop(item)) reveal.run();
+            });
+            else reveal.run();
         }
     }
 
@@ -1308,7 +1417,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         View card = vh == null ? null : vh.itemView.findViewById(R.id.card);
         if (card == null || card.getWidth() <= 0 || !card.isFocused()) return;
         float pad = 6f * density;
-        float scale = adapter.focusScale();
+        float scale = adapter.focusScaleAt(pos);
         int w = (int) (card.getWidth() * scale + 2 * pad);
         int h = (int) (card.getHeight() * scale + 2 * pad);
         if (!glassShown || card.getWidth() != glassCardW || glass.getWidth() != w || glass.getHeight() != h) {
@@ -1319,9 +1428,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     // ---- top shelf -------------------------------------------------------------------------------
 
     private void showHero(int position, float dockTopInRoot) {
+        // tvOS: the app's name stays at the top left (shown only without Top Shelf artwork, which carries the show's
+        // own logo), and the chevron rides above the dock band.
         String label = adapter.labelAt(position);
         int color = adapter.ambientColorAt(position);
-        float y = dockTopInRoot - 14 * density - 26 * density - hero.getHeight();
+        float y = tvosShell ? 52 * density : dockTopInRoot - 14 * density - 26 * density - hero.getHeight();
+        if (tvosShell) {
+            if (clockPill != null) clockPill.animate().alpha(1f).setDuration(200).start();
+            if (chevron != null) {
+                chevron.setY(dockTopInRoot - 12 * density - 22 * density);
+                chevron.animate().alpha(1f).setDuration(animations && !reducedMotion ? 260 : 0).start();
+            }
+        }
         boolean changed = !label.contentEquals(heroName.getText());
         if (cinematic) showHeroArt(position);
 
@@ -1379,9 +1497,20 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     /** The shelf's text for this dock app: its name and, on the cinematic shelf, "Last opened" and the dots. */
     private void fillHero(int position, String label) {
         heroName.setText(label);
+        if (tvosShell) {
+            // Top Shelf artwork carries the show's title and logo, so nothing is written over it, as on tvOS. An app
+            // that publishes none gets its name at the top left instead.
+            boolean explore = adapter.isExploreAt(position) && exploreInfo != null;
+            boolean art = topShelf != null && topShelf.programFor(shelfKeyAt(position)) != null;
+            hero.setVisibility(art || explore ? View.INVISIBLE : View.VISIBLE);
+            heroMeta.setVisibility(View.GONE);
+            if (exploreInfo != null) exploreInfo.setVisibility(explore ? View.VISIBLE : View.GONE);
+            if (explore) updateExploreInfo();
+            return;
+        }
         if (!cinematic) return;
         updateHeroMeta(position);
-        updateHeroDots(position);
+        if (!tvosShell) updateHeroDots(position);
     }
 
     // ---- cinematic shelf -------------------------------------------------------------------------
@@ -1396,8 +1525,911 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // One stretched bitmap: apply its alpha while drawing instead of through an offscreen buffer.
         heroArt.forceHasOverlappingRendering(false);
         View scrim = findViewById(R.id.heroScrim);
-        scrim.setBackground(scrimDrawable());
+        scrim.setBackground(tvosShell ? tvosScrimDrawable() : scrimDrawable());
         scrim.setVisibility(View.VISIBLE);
+        if (tvosShell) setUpTvosShelf();
+    }
+
+    // ---- tvOS shell ------------------------------------------------------------------------------
+
+    /**
+     * The Top Shelf's title sits at the top left like a show's logo on tvOS (tvOS 18 UI Kit: x 86, y 110 at 2x),
+     * in a medium weight with a soft shadow so it reads over any artwork; the chevron hints at the grid below.
+     */
+    private void setUpTvosShelf() {
+        heroName.setTextSize(TypedValue.COMPLEX_UNIT_SP, 46f);
+        heroName.setSingleLine(false);
+        heroName.setMaxLines(2);
+        heroName.setLineSpacing(0, 0.95f);
+        heroName.setTypeface(androidx.core.content.res.ResourcesCompat.getFont(this, R.font.outfit_medium));
+        heroName.setLetterSpacing(-0.02f);
+        heroName.setShadowLayer(6 * density, 0, density, 0x80000000);
+        heroName.setMaxWidth(getResources().getDisplayMetrics().widthPixels / 2);
+        heroName.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        heroMeta.setShadowLayer(10 * density, 0, density, 0x99000000);
+        heroDots.setVisibility(View.GONE);
+        chevron = new ImageView(this);
+        chevron.setImageResource(R.drawable.ic_chevron_up);
+        chevron.setAlpha(0f);
+        chevron.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        root.addView(chevron, root.indexOfChild(glass), new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL));
+    }
+
+    /**
+     * tvOS keeps the artwork bright: only a soft shade behind the title at the top left and a wash along the bottom
+     * that settles the dock, instead of the cinematic shelf's dark lower half.
+     */
+    private Drawable tvosScrimDrawable() {
+        int w = 480, h = 270;
+        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bmp);
+        Paint paint = new Paint();
+        paint.setShader(new RadialGradient(0, 0, w * 0.55f, new int[]{0x8C000000, 0x33000000, 0x00000000},
+                new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, w, h, paint);
+        paint.setShader(new LinearGradient(0, 0, 0, h, new int[]{0x00000000, 0x00000000, 0x59000000, 0xA6000000},
+                new float[]{0f, 0.5f, 0.78f, 1f}, Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, w, h, paint);
+        BitmapDrawable scrim = new BitmapDrawable(getResources(), bmp);
+        scrim.setGravity(Gravity.FILL);
+        return scrim;
+    }
+
+    /**
+     * The greeting, the big clock and the pills give way to one pill at the top right: the time and an avatar, as
+     * on tvOS. It opens Control Center, which holds Inputs, Wi-Fi, Picture, Sound and Settings.
+     */
+    private void setUpTvosHeader() {
+        for (int id : new int[]{R.id.btnInputs, R.id.btnWifi, R.id.btnReorder, R.id.btnLibraryTop, R.id.btnSettings}) {
+            findViewById(id).setVisibility(View.GONE);
+        }
+        LinearLayout pill = new LinearLayout(this);
+        pill.setOrientation(LinearLayout.HORIZONTAL);
+        pill.setGravity(Gravity.CENTER_VERTICAL);
+        pill.setFocusable(true);
+        pill.setClickable(true);
+        pill.setBackgroundResource(R.drawable.clock_pill_bg);
+        if (lightMode) pill.setBackground(lightPillBackground());
+        pill.setPadding((int) (9 * density), (int) (3 * density), (int) (3 * density), (int) (3 * density));
+        pill.setContentDescription(getString(R.string.control_center));
+        android.widget.TextClock time = new android.widget.TextClock(this);
+        time.setFormat12Hour("h:mm");
+        time.setFormat24Hour("H:mm");
+        time.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        time.setTypeface(androidx.core.content.res.ResourcesCompat.getFont(this, R.font.outfit_medium));
+        int timeColor = lightMode ? 0xE6FFFFFF : 0x80FFFFFF;
+        time.setTextColor(timeColor);
+        time.setIncludeFontPadding(false);
+        LinearLayout.LayoutParams timeLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        timeLp.rightMargin = (int) (7 * density);
+        pill.addView(time, timeLp);
+        ImageView avatar = new ImageView(this);
+        // The owner's Memoji (res/drawable-nodpi/avatar_photo.jpg), cut to a circle as tvOS shows a profile picture.
+        // Your own picture (res/drawable-nodpi/avatar_photo.jpg, git-ignored) when you added one, else the generic avatar.
+        int photo = getResources().getIdentifier("avatar_photo", "drawable", getPackageName());
+        if (photo != 0) {
+            androidx.core.graphics.drawable.RoundedBitmapDrawable face = androidx.core.graphics.drawable
+                    .RoundedBitmapDrawableFactory.create(getResources(),
+                            BitmapFactory.decodeResource(getResources(), photo));
+            face.setCircular(true);
+            avatar.setImageDrawable(face);
+        } else {
+            avatar.setImageResource(R.drawable.avatar);
+        }
+        pill.addView(avatar, new LinearLayout.LayoutParams((int) (25 * density), (int) (25 * density)));
+        pill.setOnFocusChangeListener((v, focused) -> {
+            time.setTextColor(focused ? 0xFF1E1E1E : timeColor);
+            v.animate().scaleX(focused ? 1.08f : 1f).scaleY(focused ? 1.08f : 1f).setDuration(160).start();
+        });
+        pill.setOnKeyListener((v, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                if (shelfMode && shelfFocus != null) enterShelfMode();
+                else focusTile(lastFocused % COLUMNS);
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && exploreTabs != null && exploreInfo != null
+                    && exploreInfo.getVisibility() == View.VISIBLE) {
+                exploreTabs[exploreTabs.length - 1].requestFocus();
+                return true;
+            }
+            return keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                    || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT;
+        });
+        pill.setOnClickListener(v -> showControlCenter());
+        ((LinearLayout) findViewById(R.id.topButtons)).addView(pill, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, (int) (31 * density)));
+        clockPill = pill;
+        // Level with Explore's tabs (tvOS puts the tab bar and the account pill on one line), or with where they would
+        // be when there is no Explore: the pill's centre on the tabs' centre line.
+        pill.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, orr, ob) -> alignClockPill());
+    }
+
+    private void alignClockPill() {
+        if (clockPill == null || clockPill.getHeight() == 0) return;
+        int[] at = new int[2];
+        clockPill.getLocationInWindow(at);
+        float pillCentre = at[1] - clockPill.getTranslationY() + clockPill.getHeight() / 2f;
+        float target;
+        if (exploreTabs != null && exploreTabs[0].getHeight() > 0) {
+            exploreTabs[0].getLocationInWindow(at);
+            target = at[1] + exploreTabs[0].getHeight() / 2f;
+        } else {
+            target = (48 + 18) * density;   // exploreInfo's top margin plus half a tab
+        }
+        float dy = target - pillCentre;
+        if (Math.abs(clockPill.getTranslationY() - dy) > 1) clockPill.setTranslationY(dy);
+    }
+
+    private void showControlCenter() {
+        if (openPopup != null) openPopup.dismiss();
+        // The screen behind, read back from the GPU (the shelf's pictures are HARDWARE bitmaps, which a software
+        // canvas cannot draw), before the grid steps back, for the controls' glass to show.
+        LiquidGlass.capture(this, root, this::showControlCenter);
+    }
+
+    private void showControlCenter(Bitmap backdrop) {
+        if (isFinishing() || !hasWindowFocus()) return;
+        final PopupWindow[] holder = new PopupWindow[1];
+        Runnable close = () -> {
+            if (holder[0] != null) holder[0].dismiss();
+        };
+        View panel = ControlCenter.build(this, lightMode, backdrop, btnWifi.getText(), new ControlCenter.Actions() {
+            @Override public void inputs() { close.run(); showInputs(); }
+            @Override public void wifi() { close.run(); open(systemIntent(Settings.ACTION_WIFI_SETTINGS)); }
+            @Override public void appearance() {
+                close.run();
+                getSharedPreferences(TVOS_PREFS, MODE_PRIVATE).edit().putBoolean(PREF_LIGHT, !lightMode).apply();
+                recreate();
+            }
+            @Override public void picture() { close.run(); open(systemIntent(Settings.ACTION_DISPLAY_SETTINGS)); }
+            @Override public void sound() { close.run(); open(systemIntent(Settings.ACTION_SOUND_SETTINGS)); }
+            @Override public void settings() { close.run(); open(systemIntent(Settings.ACTION_SETTINGS)); }
+            @Override public void launcherSettings() {
+                close.run();
+                startActivityForResult(new Intent(MainActivity.this, LauncherSettingsActivity.class),
+                        LAUNCHER_SETTINGS_REQUEST);
+            }
+            @Override public void screensaver() {
+                close.run();
+                startActivity(new Intent(MainActivity.this, ClockActivity.class));
+            }
+            @Override public void search() {
+                close.run();
+                try {
+                    startActivity(new Intent(Intent.ACTION_ASSIST).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (ActivityNotFoundException e) {
+                    Toast.makeText(MainActivity.this, R.string.not_available, Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+        // Measured up front: with a WRAP_CONTENT width the drop-down is placed as if it had none and runs off the
+        // right edge instead of lining up with the pill's.
+        panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        PopupWindow popup = glassPopup(panel, panel.getMeasuredWidth());
+        holder[0] = popup;
+        // The dock and grid step back while it is open, as tvOS dims the screen under Control Center. The shelf holds
+        // still meanwhile: the glass shows the picture captured as the panel opened, so a new program fading in or
+        // the drift moving on behind it would leave the glass showing the old one.
+        grid.animate().alpha(0.25f).setDuration(200).start();
+        // The whole screen dims a little under the panel, as on tvOS.
+        View dim = new View(this);
+        dim.setBackgroundColor(0x59000000);
+        dim.setAlpha(0f);
+        root.addView(dim, root.indexOfChild(glass), new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        dim.animate().alpha(1f).setDuration(200).start();
+        handler.removeCallbacks(shelfCycle);
+        if (kenBurns != null) kenBurns.pause();
+        popup.setOnDismissListener(() -> {
+            if (openPopup == popup) openPopup = null;
+            grid.animate().alpha(1f).setDuration(200).start();
+            dim.animate().alpha(0f).setDuration(200).withEndAction(() -> root.removeView(dim)).start();
+            if (kenBurns != null) kenBurns.resume();
+            if (heroShown && shelfPkg != null && topShelf != null && topShelf.programCount(shelfPkg) > 1) {
+                handler.removeCallbacks(shelfCycle);
+                handler.postDelayed(shelfCycle, SHELF_CYCLE_MS);
+            }
+        });
+        dropIn(popup, panel, clockPill, Gravity.END);
+    }
+
+    /** The clock pill in light glass: frosted white with a hairline, white when focused. */
+    private Drawable lightPillBackground() {
+        float r = 16 * density;
+        GradientDrawable focused = new GradientDrawable();
+        focused.setColor(0xF5FFFFFF);
+        focused.setCornerRadius(r);
+        GradientDrawable rest = new GradientDrawable();
+        rest.setColor(0x33FFFFFF);
+        rest.setStroke(Math.max(1, Math.round(density * 0.5f)), 0x80FFFFFF);
+        rest.setCornerRadius(r);
+        android.graphics.drawable.StateListDrawable states = new android.graphics.drawable.StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_focused}, focused);
+        states.addState(new int[0], rest);
+        return states;
+    }
+
+    /**
+     * OK held on a tile (tvOS: hold Select): Move picks the app up so the arrows carry it anywhere, into or out of the
+     * dock; Edit dock swaps one dock place for another app; App info is what a long press did before.
+     */
+    @Override
+    public boolean onTileLongPress(int position) {
+        if (adapter.isExploreAt(position)) return true;   // nothing to move or inspect: it is the Home of the dock
+        if (!tvosShell || reordering || position >= adapter.movableCount()) return false;
+        RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(position);
+        View anchor = vh == null ? null : vh.itemView.findViewById(R.id.card);
+        if (anchor == null) return false;
+        String pkg = adapter.packageAt(position);
+        View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+        PopupWindow popup = glassPopup(panel, (int) (200 * density));
+        addSettingsMenuRow(rows, popup, R.string.tile_move, () -> {
+            if (!beginReorder()) return;
+            focusTile(position);
+            pickUp(position);
+            Toast.makeText(this, R.string.reorder_hint, Toast.LENGTH_LONG).show();
+        });
+        if (dockRow) addSettingsMenuRow(rows, popup, R.string.dock_edit, this::startDockEdit);
+        addSettingsMenuRow(rows, popup, R.string.launcher_settings, () -> startActivityForResult(
+                new Intent(this, LauncherSettingsActivity.class), LAUNCHER_SETTINGS_REQUEST));
+        addSettingsMenuRow(rows, popup, R.string.tile_app_info, () -> open(new Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + pkg))));
+        panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        popup.setWidth(Math.max((int) (200 * density), panel.getMeasuredWidth()));
+        dropIn(popup, panel, anchor, Gravity.START);
+        rows.getChildAt(0).requestFocus();
+        return true;
+    }
+
+    // ---- Explore (TMDB picks) --------------------------------------------------------------------
+
+    /** The shelf's programs key for a dock tile: the app's package, or Explore's current tab. */
+    private String shelfKeyAt(int position) {
+        return adapter.isExploreAt(position) ? "explore:" + exploreTab : adapter.packageAt(position);
+    }
+
+    /** New picks (or a new hour): each tab's three become its shelf's programs. */
+    private void onPicksLoaded() {
+        if (picks == null || topShelf == null) return;
+        for (int tab = 0; tab < 3; tab++) {
+            exploreLists[tab] = picks.picks(tab);
+            List<TopShelf.Program> programs = new ArrayList<>();
+            for (TmdbPicks.Pick p : exploreLists[tab]) programs.add(new TopShelf.Program(p.title, p.backdrop));
+            topShelf.putPrograms("explore:" + tab, programs);
+        }
+        if (inCarousel) {
+            buildCarousel();
+            return;
+        }
+        if (heroShown && adapter.isExploreAt(lastFocused)) {
+            shelfPkg = null;
+            showHeroArt(lastFocused);
+            fillHero(lastFocused, adapter.labelAt(lastFocused));
+        }
+    }
+
+    /** The tabs, then the title's logo or name, a meta line and the synopsis, at the top left like tvOS's TV app. */
+    private void setUpExploreInfo() {
+        android.graphics.Typeface medium = androidx.core.content.res.ResourcesCompat.getFont(this, R.font.outfit_medium);
+        exploreInfo = new LinearLayout(this);
+        exploreInfo.setOrientation(LinearLayout.VERTICAL);
+        exploreInfo.setVisibility(View.GONE);
+        LinearLayout tabsRow = new LinearLayout(this);
+        tabsRow.setOrientation(LinearLayout.HORIZONTAL);
+        int[] names = {R.string.explore, R.string.explore_movies, R.string.explore_shows};
+        exploreTabs = new TextView[names.length];
+        for (int i = 0; i < names.length; i++) {
+            TextView tab = new TextView(this);
+            tab.setText(names[i]);
+            tab.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            tab.setTypeface(medium);
+            tab.setPadding((int) (16 * density), (int) (7 * density), (int) (16 * density), (int) (7 * density));
+            tab.setFocusable(true);
+            tab.setBackground(tabBackground());
+            tab.setTextColor(new android.content.res.ColorStateList(
+                    new int[][]{{android.R.attr.state_focused}, {android.R.attr.state_selected}, {}},
+                    new int[]{0xFF1E1E1E, 0xFFFFFFFF, 0xB3FFFFFF}));
+            tab.setShadowLayer(6 * density, 0, density, 0x66000000);
+            final int index = i;
+            tab.setOnFocusChangeListener((v, focused) -> {
+                ((TextView) v).setShadowLayer(focused ? 0 : 6 * density, 0, density, 0x66000000);
+                if (focused && index != exploreTab) selectExploreTab(index);
+            });
+            tab.setOnClickListener(v -> onExploreSelected());
+            tab.setOnKeyListener((v, code, e) -> {
+                if (e.getAction() != KeyEvent.ACTION_DOWN) return false;
+                if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER) {
+                    if (e.getRepeatCount() == 0) onExploreSelected();
+                    return true;
+                }
+                if (code == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    if (inCarousel && carousel.getChildCount() > 0) focusCard(carouselFocus);
+                    else focusTile(Math.max(0, lastFocused));
+                    return true;
+                }
+                if (code == KeyEvent.KEYCODE_DPAD_UP) {
+                    if (clockPill != null) clockPill.requestFocus();
+                    return true;
+                }
+                if (code == KeyEvent.KEYCODE_DPAD_RIGHT && index == names.length - 1) {
+                    // Past the last tab: on to the clock pill (Control Center), on the same line at the top.
+                    if (clockPill != null) clockPill.requestFocus();
+                    return true;
+                }
+                return code == KeyEvent.KEYCODE_DPAD_LEFT && index == 0;
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (i > 0) lp.leftMargin = (int) (6 * density);
+            tabsRow.addView(tab, lp);
+            exploreTabs[i] = tab;
+        }
+        exploreTabs[0].setSelected(true);
+        exploreTabs[0].addOnLayoutChangeListener((v, l, t, r, b, ol, ot, orr, ob) -> alignClockPill());
+        exploreInfo.addView(tabsRow);
+
+        exploreLogo = new ImageView(this);
+        exploreLogo.setAdjustViewBounds(true);
+        exploreLogo.setMaxWidth((int) (420 * density));
+        exploreLogo.setMaxHeight((int) (120 * density));
+        exploreLogo.setScaleType(ImageView.ScaleType.FIT_START);
+        LinearLayout.LayoutParams logoLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        logoLp.topMargin = (int) (40 * density);
+        exploreInfo.addView(exploreLogo, logoLp);
+
+        exploreTitle = exploreText(44, medium, 0xFFFFFFFF);
+        exploreTitle.setMaxLines(2);
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams((int) (560 * density),
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        titleLp.topMargin = (int) (40 * density);
+        exploreInfo.addView(exploreTitle, titleLp);
+
+        exploreMeta = exploreText(15, medium, 0xD9FFFFFF);
+        LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        metaLp.topMargin = (int) (14 * density);
+        exploreInfo.addView(exploreMeta, metaLp);
+
+        exploreOverview = exploreText(15, androidx.core.content.res.ResourcesCompat.getFont(this, R.font.outfit_regular),
+                0xCCFFFFFF);
+        exploreOverview.setMaxLines(3);
+        exploreOverview.setLineSpacing(0, 1.12f);
+        LinearLayout.LayoutParams ovLp = new LinearLayout.LayoutParams((int) (520 * density),
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        ovLp.topMargin = (int) (8 * density);
+        exploreInfo.addView(exploreOverview, ovLp);
+
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
+        lp.leftMargin = (int) (68 * density);
+        lp.topMargin = (int) (48 * density);
+        root.addView(exploreInfo, root.indexOfChild(glass), lp);
+    }
+
+    private TextView exploreText(float sp, android.graphics.Typeface font, int color) {
+        TextView t = new TextView(this);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        t.setTypeface(font);
+        t.setTextColor(color);
+        t.setShadowLayer(8 * density, 0, density, 0x8C000000);
+        t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        t.setIncludeFontPadding(false);
+        return t;
+    }
+
+    /** A tab: white when focused, faint glass when it is the tab shown, nothing otherwise. */
+    private Drawable tabBackground() {
+        float r = 18 * density;
+        GradientDrawable focused = new GradientDrawable();
+        focused.setColor(0xF5FFFFFF);
+        focused.setCornerRadius(r);
+        GradientDrawable selected = new GradientDrawable();
+        selected.setColor(0x40FFFFFF);
+        selected.setStroke(Math.max(1, Math.round(density * 0.5f)), 0x4DFFFFFF);
+        selected.setCornerRadius(r);
+        android.graphics.drawable.StateListDrawable states = new android.graphics.drawable.StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_focused}, focused);
+        states.addState(new int[]{android.R.attr.state_selected}, selected);
+        states.addState(new int[0], new ColorDrawable(Color.TRANSPARENT));
+        states.setExitFadeDuration(120);
+        return states;
+    }
+
+    /** Shows another tab's picks: its first title fades in and the cycle starts over. */
+    private void selectExploreTab(int tab) {
+        exploreTab = tab;
+        for (int i = 0; i < exploreTabs.length; i++) exploreTabs[i].setSelected(i == tab);
+        shelfPkg = null;
+        if (inCarousel) {
+            carouselFocus = 0;
+            buildCarousel();
+            showCardBackdrop(0);
+            return;
+        }
+        if (adapter.isExploreAt(lastFocused)) {
+            showHeroArt(lastFocused);
+            updateExploreInfo();
+        }
+    }
+
+    /** The info for the pick on the shelf now. */
+    private void updateExploreInfo() {
+        if (exploreInfo == null || inCarousel) return;
+        List<TmdbPicks.Pick> list = exploreLists[exploreTab];
+        if (list.isEmpty()) {
+            exploreLogo.setVisibility(View.GONE);
+            exploreTitle.setVisibility(View.VISIBLE);
+            exploreTitle.setText(R.string.explore);
+            exploreMeta.setText("");
+            exploreOverview.setText("");
+            return;
+        }
+        TmdbPicks.Pick p = list.get(Math.min(Math.max(0, shelfIndex), list.size() - 1));
+        exploreTitle.setText(p.title);
+        String kind = getString(p.movie ? R.string.explore_movie : R.string.explore_show);
+        exploreMeta.setText(kind + (p.year.isEmpty() ? "" : " \u00B7 " + p.year) + " \u00B7 "
+                + getString(R.string.explore_on, p.appName));
+        exploreOverview.setText(p.overview);
+        if (p.logo == null) {
+            exploreLogoUrl = null;
+            exploreLogo.setVisibility(View.GONE);
+            exploreTitle.setVisibility(View.VISIBLE);
+            return;
+        }
+        if (p.logo.equals(exploreLogoUrl)) return;
+        exploreLogoUrl = p.logo;
+        // The name stands in until the logo is decoded, then the logo takes its place.
+        exploreLogo.setVisibility(View.GONE);
+        exploreTitle.setVisibility(View.VISIBLE);
+        String url = p.logo;
+        topShelf.image(url, bmp -> {
+            if (!url.equals(exploreLogoUrl)) return;
+            exploreLogo.setImageBitmap(bmp);
+            exploreLogo.setVisibility(View.VISIBLE);
+            exploreTitle.setVisibility(View.GONE);
+        });
+    }
+
+    /** OK on the Explore tile or a tab: open the pick on the shelf in its app. */
+    @Override
+    public void onExploreSelected() {
+        List<TmdbPicks.Pick> list = exploreLists[exploreTab];
+        if (list.isEmpty()) return;
+        int at = inCarousel ? carouselFocus : shelfIndex;
+        openPick(list.get(Math.min(Math.max(0, at), list.size() - 1)));
+    }
+
+    /**
+     * A pick opens on its title where possible: the app's own link when the app publishes this title to the system,
+     * else the app's search with the title typed in (Prime Video, HBO Max), else the app's home.
+     */
+    private void openPick(TmdbPicks.Pick p) {
+        topShelf.findLink(p.app, p.title, link -> {
+            if (link != null && link.resolveActivity(getPackageManager()) != null) {
+                open(link);
+                return;
+            }
+            Intent search = searchIntent(p.app, p.title);
+            if (search != null && search.resolveActivity(getPackageManager()) != null) {
+                open(search);
+                return;
+            }
+            openApp(p);
+        });
+    }
+
+    /** The app's search for a title, for the apps whose search link was checked on this TV; null for the others. */
+    private static Intent searchIntent(String pkg, String title) {
+        String q = Uri.encode(title);
+        String url;
+        switch (pkg) {
+            case "com.amazon.amazonvideo.livingroom":
+                url = "https://app.primevideo.com/search?phrase=" + q;
+                break;
+            case "com.wbd.stream":
+                url = "https://play.max.com/search/result?q=" + q;
+                break;
+            default:
+                return null;
+        }
+        return new Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage(pkg);
+    }
+
+    private void openApp(TmdbPicks.Pick p) {
+        Intent i = getPackageManager().getLeanbackLaunchIntentForPackage(p.app);
+        if (i == null) i = getPackageManager().getLaunchIntentForPackage(p.app);
+        if (i == null) {
+            Toast.makeText(this, R.string.not_available, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        open(i);
+    }
+
+    // ---- Shelf focus ---------------------------------------------------------------------------------
+
+    /** The focused dock app's program on the shelf now, with its link, or null. */
+    private TopShelf.Program currentShelfProgram() {
+        if (topShelf == null || lastFocused < 0 || lastFocused >= COLUMNS || adapter.isExploreAt(lastFocused)) return null;
+        return topShelf.programAt(adapter.packageAt(lastFocused), Math.max(0, shelfIndex));
+    }
+
+    private Intent currentShelfLink() {
+        TopShelf.Program p = currentShelfProgram();
+        return p == null ? null : TopShelf.intentOf(p.intent);
+    }
+
+    private void enterShelfMode() {
+        if (shelfFocus == null) {
+            shelfFocus = new View(this);
+            shelfFocus.setFocusable(true);
+            shelfFocus.setOnKeyListener((v, code, e) -> {
+                if (e.getAction() != KeyEvent.ACTION_DOWN) return code == KeyEvent.KEYCODE_BACK;
+                switch (code) {
+                    case KeyEvent.KEYCODE_DPAD_CENTER:
+                    case KeyEvent.KEYCODE_ENTER:
+                        if (e.getRepeatCount() == 0) {
+                            Intent link = currentShelfLink();
+                            if (link != null) open(link);
+                        }
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_UP:
+                        // On to the clock pill: the dock comes back, so the clean shelf only shows while OK opens it.
+                        // shelfMode stays on, so Down from the pill returns to the shelf.
+                        if (clockPill != null) {
+                            showDockAgain();
+                            clockPill.requestFocus();
+                        }
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_DOWN:
+                    case KeyEvent.KEYCODE_BACK:
+                        focusTile(lastFocused);
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_LEFT:
+                    case KeyEvent.KEYCODE_DPAD_RIGHT:
+                        stepShelf(code == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1);
+                        return true;
+                    default:
+                        return false;
+                }
+            });
+            root.addView(shelfFocus, new FrameLayout.LayoutParams(1, 1));
+
+            shelfHint = new TextView(this);
+            shelfHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            shelfHint.setTypeface(androidx.core.content.res.ResourcesCompat.getFont(this, R.font.outfit_medium));
+            shelfHint.setTextColor(0xFFFFFFFF);
+            shelfHint.setShadowLayer(8 * density, 0, density, 0x99000000);
+            shelfHint.setLineSpacing(0, 1.15f);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.START);
+            lp.leftMargin = (int) (68 * density);
+            lp.bottomMargin = (int) (48 * density);
+            root.addView(shelfHint, root.indexOfChild(glass), lp);
+        }
+        shelfMode = true;
+        updateShelfHint();
+        shelfHint.setAlpha(0f);
+        shelfHint.setVisibility(View.VISIBLE);
+        shelfHint.animate().alpha(1f).setDuration(220).start();
+        if (chevron != null) chevron.setAlpha(0f);
+        // The dock slides off the bottom, as tvOS clears the screen for the Top Shelf.
+        grid.animate().translationY(160 * density).alpha(0f).setDuration(animations && !reducedMotion ? 260 : 0).start();
+        shelfFocus.requestFocus();
+    }
+
+    private void leaveShelfMode() {
+        shelfMode = false;
+        showDockAgain();
+    }
+
+    private void showDockAgain() {
+        if (shelfHint != null) shelfHint.setVisibility(View.GONE);
+        grid.animate().translationY(0f).alpha(1f).setDuration(animations && !reducedMotion ? 220 : 0).start();
+    }
+
+    /** "Te conozco" over "OK: watch on Netflix", bottom left. */
+    private void updateShelfHint() {
+        if (shelfHint == null) return;
+        TopShelf.Program p = currentShelfProgram();
+        String app = adapter.labelAt(lastFocused);
+        String title = p == null || p.title == null ? "" : p.title;
+        shelfHint.setText((title.isEmpty() ? "" : title + "\n") + getString(R.string.shelf_watch_on, app));
+    }
+
+    /** Left and Right on the shelf: the app's previous or next program. */
+    private void stepShelf(int by) {
+        String pkg = adapter.packageAt(lastFocused);
+        int n = topShelf.programCount(pkg);
+        if (n < 2) return;
+        shelfIndex = ((shelfIndex + by) % n + n) % n;
+        String key = lastFocusedKey, pictureKey = "shelf:" + pkg + "#" + shelfIndex;
+        handler.removeCallbacks(shelfCycle);
+        handler.postDelayed(shelfCycle, SHELF_CYCLE_MS);
+        updateShelfHint();
+        topShelf.pictureFor(pkg, shelfIndex, (p, bmp) -> {
+            if (!shelfMode || key == null || !key.equals(lastFocusedKey)) return;
+            showSharp(bmp, pictureKey, false);
+        });
+    }
+
+    // ---- Explore carousel --------------------------------------------------------------------------
+
+    private void enterCarousel(int index) {
+        if (carousel == null) {
+            carousel = new LinearLayout(this);
+            carousel.setOrientation(LinearLayout.HORIZONTAL);
+            carousel.setClipChildren(false);
+            carousel.setClipToPadding(false);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
+            // Room around the cards for the focused one's zoom: the root clips the carousel to its own bounds, which cut
+            // the zoomed end card's rounded corners square.
+            int room = (int) (16 * density);
+            carousel.setPadding(room, room, room, room);
+            lp.leftMargin = (int) (68 * density) - room;
+            lp.topMargin = (int) (112 * density) - room;
+            root.addView(carousel, root.indexOfChild(glass), lp);
+        }
+        inCarousel = true;
+        carouselFocus = index;
+        handler.removeCallbacks(shelfCycle);
+        stopKenBurns();
+        for (View v : new View[]{exploreLogo, exploreTitle, exploreMeta, exploreOverview}) v.setVisibility(View.GONE);
+        root.invalidate();
+        if (chevron != null) chevron.setAlpha(0f);
+        buildCarousel();
+        carousel.setVisibility(View.VISIBLE);
+        carousel.setAlpha(0f);
+        carousel.animate().alpha(1f).setDuration(animations && !reducedMotion ? 200 : 0).start();
+        focusCard(index);
+    }
+
+    /** Back to the Explore tile: the sharp shelf with the pick's logo and synopsis. */
+    private void leaveCarousel() {
+        inCarousel = false;
+        setDockBackdrop(null);
+        heroArtKey = null;
+        if (carousel != null) carousel.setVisibility(View.GONE);
+        exploreOverview.setVisibility(View.VISIBLE);
+        exploreMeta.setVisibility(View.VISIBLE);
+        exploreLogoUrl = null;
+        shelfPkg = null;
+        shelfPictureKey = null;
+        heroShown = false;   // so showHero brings the shelf back in full
+    }
+
+    private void focusCard(int i) {
+        if (carousel == null || carousel.getChildCount() == 0) return;
+        View column = carousel.getChildAt(Math.max(0, Math.min(i, carousel.getChildCount() - 1)));
+        column.findViewById(R.id.card).requestFocus();
+    }
+
+    /** One column per pick: the card (wide when focused) and its name, plus the meta line under the focused one. */
+    private void buildCarousel() {
+        carousel.removeAllViews();
+        List<TmdbPicks.Pick> list = exploreLists[exploreTab];
+        android.graphics.Typeface medium = androidx.core.content.res.ResourcesCompat.getFont(this, R.font.outfit_medium);
+        float r = 14 * density;
+        for (int i = 0; i < list.size(); i++) {
+            TmdbPicks.Pick p = list.get(i);
+            final int index = i;
+            LinearLayout column = new LinearLayout(this);
+            column.setOrientation(LinearLayout.VERTICAL);
+            column.setClipChildren(false);
+            column.setClipToPadding(false);
+
+            FrameLayout card = new FrameLayout(this);
+            card.setId(R.id.card);
+            card.setFocusable(true);
+            card.setClickable(true);
+            // The rounded shape is the card's background, so the outline (BACKGROUND) follows every width change.
+            GradientDrawable shape = new GradientDrawable();
+            shape.setColor(0xFF1C1C1E);
+            shape.setCornerRadius(r);
+            card.setBackground(shape);
+            card.setOutlineProvider(android.view.ViewOutlineProvider.BACKGROUND);
+            card.setClipToOutline(true);
+            ImageView image = new ImageView(this);
+            image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            card.addView(image, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+            column.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    (int) (CARD_H * density)));
+
+            TextView name = new TextView(this);
+            name.setText(p.title);
+            name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            name.setTypeface(medium);
+            name.setTextColor(0xFFFFFFFF);
+            name.setSingleLine(true);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            name.setShadowLayer(8 * density, 0, density, 0x8C000000);
+            LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            nameLp.topMargin = (int) (10 * density);
+            column.addView(name, nameLp);
+
+            TextView meta = new TextView(this);
+            String kind = getString(p.movie ? R.string.explore_movie : R.string.explore_show);
+            meta.setText(kind + (p.year.isEmpty() ? "" : " \u00B7 " + p.year) + " \u00B7 " + p.appName);
+            meta.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            meta.setTypeface(medium);
+            meta.setTextColor(0xB3FFFFFF);
+            meta.setSingleLine(true);
+            meta.setShadowLayer(6 * density, 0, density, 0x8C000000);
+            LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            metaLp.topMargin = (int) (3 * density);
+            column.addView(meta, metaLp);
+
+            boolean wide = i == carouselFocus;
+            meta.setVisibility(wide ? View.VISIBLE : View.INVISIBLE);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    (int) ((wide ? CARD_WIDE : CARD_NARROW) * density), ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (i > 0) lp.leftMargin = (int) (CARD_GAP * density);
+            carousel.addView(column, lp);
+
+            // The wide card shows the backdrop, a narrow one the poster (or the backdrop when there is none).
+            Bitmap[] art = new Bitmap[2];
+            Runnable showArt = () -> {
+                boolean isWide = index == carouselFocus;
+                Bitmap b = isWide || art[1] == null ? art[0] : art[1];
+                if (b != null) image.setImageBitmap(b);
+            };
+            column.setTag(showArt);
+            // The card is ~700 px wide: TMDB's 780 px copy, not the shelf's 1280, is a third of the pixels to sample.
+            loadCardArt(p.backdrop.replace("/w1280/", "/w780/"), bmp -> {
+                art[0] = bmp;
+                showArt.run();
+            });
+            if (p.poster != null) loadCardArt(p.poster, bmp -> {
+                art[1] = bmp;
+                showArt.run();
+            });
+
+            card.setOnFocusChangeListener((v, focused) -> {
+                // Scale only: a dynamic shadow on a scaling card cost most of each frame on this GPU. The zoom draws
+                // past the card's bounds, which partial redraws leave behind: the whole carousel is redrawn with it.
+                v.animate().scaleX(focused ? 1.05f : 1f).scaleY(focused ? 1.05f : 1f).setDuration(160)
+                        .setUpdateListener(an -> carousel.invalidate()).start();
+                if (!focused || index == carouselFocus && column.getLayoutParams().width
+                        == (int) (CARD_WIDE * density)) {
+                    if (focused) showCardBackdrop(index);
+                    return;
+                }
+                carouselFocus = index;
+                resizeCards();
+                showCardBackdrop(index);
+            });
+            card.setOnClickListener(v -> openPick(p));
+            card.setOnKeyListener((v, code, e) -> {
+                if (e.getAction() != KeyEvent.ACTION_DOWN) return false;
+                switch (code) {
+                    case KeyEvent.KEYCODE_DPAD_LEFT:
+                        if (index > 0) focusCard(index - 1);
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_RIGHT:
+                        if (index < carousel.getChildCount() - 1) focusCard(index + 1);
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_UP:
+                        exploreTabs[exploreTab].requestFocus();
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_DOWN:
+                        focusTile(Math.max(0, lastFocused));
+                        return true;
+                    default:
+                        return false;
+                }
+            });
+        }
+    }
+
+    private void loadCardArt(String url, java.util.function.Consumer<Bitmap> done) {
+        Bitmap b = cardArt.get(url);
+        if (b != null) {
+            done.accept(b);
+            return;
+        }
+        topShelf.image(url, false, bmp -> {
+            cardArt.put(url, bmp);
+            done.accept(bmp);
+        });
+    }
+
+    /** The focused card grows wide and shows its backdrop; the one it leaves narrows to its poster. */
+    private void resizeCards() {
+        int n = carousel.getChildCount();
+        int[] from = new int[n], to = new int[n];
+        for (int i = 0; i < n; i++) {
+            View column = carousel.getChildAt(i);
+            boolean wide = i == carouselFocus;
+            ((Runnable) column.getTag()).run();
+            ((LinearLayout) column).getChildAt(2).setVisibility(wide ? View.VISIBLE : View.INVISIBLE);
+            from[i] = column.getLayoutParams().width;
+            to[i] = (int) ((wide ? CARD_WIDE : CARD_NARROW) * density);
+        }
+        // One layout pass, not one per frame: animating the widths re-laid and rescaled four large pictures every
+        // frame (84% of frames late on this TV). The cards fade into their new shape instead, which the GPU does free.
+        for (int i = 0; i < n; i++) {
+            View column = carousel.getChildAt(i);
+            column.getLayoutParams().width = to[i];
+        }
+        carousel.requestLayout();
+        root.invalidate();   // the cards' old zoomed edges and the shelf's text otherwise stay on screen
+    }
+
+    /** Behind the carousel: the focused pick's picture blurred into soft colour, as under the app grid. */
+    private void showCardBackdrop(int index) {
+        String key = "explore:" + exploreTab;
+        topShelf.pictureFor(key, index, (pkg, bmp) -> {
+            if (!inCarousel || index != carouselFocus) return;
+            Bitmap blur = topShelf.blurOf(bmp);
+            if (blur == null) return;
+            heroArt.animate().cancel();
+            stopKenBurns();
+            heroArt.setScaleType(ImageView.ScaleType.FIT_XY);
+            heroArt.setImageBitmap(blur);
+            // No full-screen fade per card: the blurred colour simply changes, as it does under the app grid.
+            heroArt.setAlpha(0.9f);
+            findViewById(R.id.heroScrim).setAlpha(0.45f);
+            setDockBackdrop(blur);
+        });
+    }
+
+    /** The provider was read: show the focused dock app's picture if the softened stand-in is up. */
+    private void onTopShelfLoaded() {
+        if (heroShown && lastFocused >= 0 && lastFocused < COLUMNS) showHeroArt(lastFocused);
+    }
+
+    /**
+     * tvOS: moving down from the dock lifts the dock to the top of the screen with every row it leaves room for under
+     * it, instead of creeping one row at a time. True when that placement shows this tile in full; deeper rows scroll
+     * the usual way.
+     */
+    private boolean parkDockAtTop(View item) {
+        RecyclerView.ViewHolder dockVh = grid.findViewHolderForAdapterPosition(0);
+        if (dockVh == null) return false;
+        // The band's top 30 dp from the top of the screen, measured on screen: the grid itself starts below the
+        // header, which the clock pill alone occupies on the tvOS shell and gives up here.
+        int[] at = new int[2];
+        dockVh.itemView.getLocationInWindow(at);
+        int bandTop = at[1] + (int) (6 * density) - (int) (12 * density);
+        int dy = bandTop - (int) (30 * density);
+        if (item.getBottom() - dy > grid.getHeight() - (int) (16 * density)) return false;
+        if (Math.abs(dy) > (int) (4 * density)) {
+            if (!animations || reducedMotion) grid.scrollBy(0, dy);
+            else grid.smoothScrollBy(0, dy, new android.view.animation.DecelerateInterpolator(1.6f));
+        }
+        return true;
+    }
+
+    /** The grid's backdrop: the Top Shelf picture (or the app's softened artwork) blurred, bright, full screen. */
+    private void showShelfBlur() {
+        Bitmap blur = null;
+        if (shelfPicture != null && shelfPictureKey != null) {
+            blur = shelfBlur(shelfPicture, shelfPictureKey);
+        } else if (heroArtKey != null) {
+            blur = heroArtCache.get(heroArtKey);
+        }
+        heroArt.animate().cancel();
+        handler.removeCallbacks(shelfCycle);
+        stopKenBurns();
+        if (blur == null) {
+            heroArt.setAlpha(0f);
+            return;
+        }
+        heroArt.setScaleType(ImageView.ScaleType.FIT_XY);
+        heroArt.setImageBitmap(blur);
+        setDockBackdrop(blur);
+        heroArt.animate().alpha(0.9f).setDuration(animations && !reducedMotion ? 360 : 0).start();
+        View scrim = findViewById(R.id.heroScrim);
+        scrim.animate().alpha(0.35f).setDuration(animations && !reducedMotion ? 360 : 0).start();
+        if (chevron != null) chevron.animate().alpha(0f).setDuration(120).start();
     }
 
     /**
@@ -1426,8 +2458,22 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private void showHeroArt(int position) {
         String key = adapter.keyAt(position);
         if (key == null) return;
+        if (tvosShell && showShelfPicture(position, key)) return;
+        if (tvosShell) {
+            shelfPicture = null;
+            shelfPictureKey = null;
+            // The stand-in shows while a Top Shelf picture downloads: the program cycle keeps its timer then, and
+            // stops only for an app that publishes nothing.
+            if (topShelf == null || topShelf.programFor(adapter.packageAt(position)) == null) {
+                handler.removeCallbacks(shelfCycle);
+            }
+            stopKenBurns();
+            heroArt.setScaleType(ImageView.ScaleType.FIT_XY);
+            findViewById(R.id.heroScrim).animate().alpha(1f).setDuration(200).start();
+        }
         heroArt.animate().cancel();
         if (key.equals(heroArtKey)) {
+            if (tvosShell) setDockBackdrop(heroArtCache.get(key));
             fadeHeroArt(420);
             return;
         }
@@ -1438,6 +2484,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         heroArtKey = key;
         final Bitmap next = art;
+        if (tvosShell) setDockBackdrop(art);
         if (!animations || reducedMotion || heroArt.getAlpha() == 0f) {
             heroArt.setImageBitmap(next);
             fadeHeroArt(600);
@@ -1445,13 +2492,138 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         heroArt.animate().alpha(0f).setDuration(140).withEndAction(() -> {
             heroArt.setImageBitmap(next);
-            heroArt.animate().alpha(HERO_ART_ALPHA).setDuration(420).start();
+            heroArt.animate().alpha(heroArtAlpha()).setDuration(420).start();
         }).start();
     }
 
+    /**
+     * tvOS shell: this dock app's Top Shelf picture, sharp and full screen. True when the app publishes one; until it
+     * is decoded (once, then cached) the softened app artwork stands in and the picture fades in over it.
+     */
+    private boolean showShelfPicture(int position, String key) {
+        String pkg = shelfKeyAt(position);
+        if (topShelf == null || topShelf.programFor(pkg) == null) return false;
+        if (!pkg.equals(shelfPkg)) {
+            shelfPkg = pkg;
+            shelfIndex = 0;
+        }
+        handler.removeCallbacks(shelfCycle);
+        if (topShelf.programCount(pkg) > 1 && animations && !reducedMotion) handler.postDelayed(shelfCycle, SHELF_CYCLE_MS);
+        String pictureKey = "shelf:" + pkg + "#" + shelfIndex;
+        if (pictureKey.equals(shelfPictureKey) && shelfPicture != null) {
+            showSharp(shelfPicture, pictureKey, false);
+            return true;
+        }
+        final boolean[] immediate = {true};
+        topShelf.pictureFor(pkg, shelfIndex, (p, bmp) -> {
+            // Still on this dock app, still on the shelf (not scrolled into the grid).
+            if (!key.equals(lastFocusedKey) || (!immediate[0] && !heroShown)) return;
+            showSharp(bmp, pictureKey, !immediate[0]);
+        });
+        immediate[0] = false;
+        return shelfPicture != null && pictureKey.equals(shelfPictureKey);
+    }
+
+    /** The dock glass shows this blurred picture behind it; redrawn only when the picture changes. */
+    private void setDockBackdrop(Bitmap blurred) {
+        if (dockDecoration == null) return;
+        dockDecoration.setBackdrop(blurred);
+        grid.invalidate();
+    }
+
+    /** A Top Shelf picture reduced and blurred like HeroArt, made once per picture. */
+    private Bitmap shelfBlur(Bitmap sharp, String pictureKey) {
+        Bitmap blur = shelfBlurCache.get(pictureKey);
+        if (blur == null && topShelf != null) {
+            // Made on TopShelf's worker with the picture; a HARDWARE picture can't be blurred here.
+            blur = topShelf.blurOf(sharp);
+            if (blur != null) shelfBlurCache.put(pictureKey, blur);
+        }
+        return blur;
+    }
+
+    private void showSharp(Bitmap bmp, String pictureKey, boolean late) {
+        boolean same = pictureKey.equals(shelfPictureKey) && heroArt.getAlpha() > 0.95f
+                && heroArt.getScaleType() == ImageView.ScaleType.CENTER_CROP;
+        shelfPicture = bmp;
+        shelfPictureKey = pictureKey;
+        heroArtKey = null;
+        heroArt.animate().cancel();
+        findViewById(R.id.heroScrim).animate().alpha(1f).setDuration(200).start();
+        // The dock's glass shows this picture from now, whatever happens to the fade below (a later focus can cancel it,
+        // which left the dock tinted by the previous picture, e.g. Explore's carousel).
+        setDockBackdrop(shelfBlur(bmp, pictureKey));
+        if (same) {
+            if (kenBurns == null) startKenBurns();   // back from the grid, where the picture stood still
+            return;
+        }
+        Runnable swap = () -> {
+            heroArt.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            heroArt.setImageBitmap(bmp);
+            startKenBurns();
+            if (!animations) heroArt.setAlpha(1f);
+            else heroArt.animate().alpha(1f).setDuration(reducedMotion ? Motion.REDUCED_MS : 480).start();
+        };
+        if (!animations || reducedMotion || heroArt.getAlpha() == 0f) swap.run();
+        else heroArt.animate().alpha(late ? 0.6f : 0f).setDuration(late ? 80 : 140).withEndAction(swap).start();
+    }
+
+    /** The next program of the focused dock app, while its shelf is still on screen. */
+    private void nextShelfProgram() {
+        if (inCarousel) return;
+        if (openPopup != null) return;   // Control Center (or another panel) is up; its dismiss restarts the cycle
+        if (!heroShown || shelfPkg == null || lastFocused < 0 || lastFocused >= COLUMNS
+                || !shelfPkg.equals(shelfKeyAt(lastFocused))) return;
+        int n = topShelf.programCount(shelfPkg);
+        if (n < 2) return;
+        shelfIndex = (shelfIndex + 1) % n;
+        if (adapter.isExploreAt(lastFocused)) updateExploreInfo();
+        String pkg = shelfPkg, key = lastFocusedKey, pictureKey = "shelf:" + pkg + "#" + shelfIndex;
+        topShelf.pictureFor(pkg, shelfIndex, (p, bmp) -> {
+            if (!heroShown || !pkg.equals(shelfPkg) || key == null || !key.equals(lastFocusedKey)) return;
+            showSharp(bmp, pictureKey, false);
+            if (shelfMode) updateShelfHint();
+        });
+        handler.postDelayed(shelfCycle, SHELF_CYCLE_MS);
+    }
+
+    /** A slow drift over the shelf's picture: zoom 1 to 1.08 with a small pan, alternating direction. */
+    private void startKenBurns() {
+        stopKenBurns();
+        if (!animations || reducedMotion) return;
+        boolean in = (shelfIndex & 1) == 0;
+        float pan = 24 * density * (in ? -1 : 1);
+        heroArt.setScaleX(in ? 1f : 1.08f);
+        heroArt.setScaleY(in ? 1f : 1.08f);
+        heroArt.setTranslationX(in ? 0f : -pan);
+        android.animation.AnimatorSet set = new android.animation.AnimatorSet();
+        set.playTogether(
+                android.animation.ObjectAnimator.ofFloat(heroArt, View.SCALE_X, in ? 1.08f : 1f),
+                android.animation.ObjectAnimator.ofFloat(heroArt, View.SCALE_Y, in ? 1.08f : 1f),
+                android.animation.ObjectAnimator.ofFloat(heroArt, View.TRANSLATION_X, in ? pan : 0f));
+        set.setDuration(SHELF_CYCLE_MS + 1_500L);
+        set.setInterpolator(new android.view.animation.LinearInterpolator());
+        set.start();
+        kenBurns = set;
+    }
+
+    /** Back to the still, full-screen picture (the grid's blurred backdrop must not drift or zoom). */
+    private void stopKenBurns() {
+        if (kenBurns != null) kenBurns.cancel();
+        kenBurns = null;
+        heroArt.setScaleX(1f);
+        heroArt.setScaleY(1f);
+        heroArt.setTranslationX(0f);
+    }
+
+    /** The softened artwork behind the shelf: brighter on the tvOS shell, whose scrim is lighter. */
+    private float heroArtAlpha() {
+        return tvosShell ? 0.8f : HERO_ART_ALPHA;
+    }
+
     private void fadeHeroArt(int ms) {
-        if (!animations) heroArt.setAlpha(HERO_ART_ALPHA);
-        else heroArt.animate().alpha(HERO_ART_ALPHA).setDuration(reducedMotion ? Math.min(ms, Motion.REDUCED_MS) : ms).start();
+        if (!animations) heroArt.setAlpha(heroArtAlpha());
+        else heroArt.animate().alpha(heroArtAlpha()).setDuration(reducedMotion ? Math.min(ms, Motion.REDUCED_MS) : ms).start();
     }
 
     /** "Last opened yesterday, 9:40 PM", the time in white; nothing (but the same height) when it was never seen. */
@@ -1586,9 +2758,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         hero.animate().cancel();
         ambient.animate().cancel();
         hero.setAlpha(0f);
+        heroShown = false;
+        if (tvosShell) {
+            if (exploreInfo != null) exploreInfo.setVisibility(View.GONE);
+            // tvOS: the grid sits on the shelf's picture blurred into soft colour, with no glow of its own, and the
+            // clock pill steps back.
+            showShelfBlur();
+            if (clockPill != null) clockPill.animate().alpha(0f).setDuration(200).start();
+            ambient.setAlpha(0f);
+            return;
+        }
         heroArt.animate().cancel();
         heroArt.setAlpha(0f);
-        heroShown = false;
         if (!ambientGlow) return;
         if (!animations || reducedMotion) {
             setAmbient(color);
@@ -1613,14 +2794,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         ambient.animate().cancel();
         heroArt.animate().cancel();
         heroShown = false;
+        if (chevron != null) chevron.setAlpha(0f);
         if (animations && !reducedMotion) {
             hero.animate().alpha(0f).setDuration(160).start();
             if (ambientGlow) ambient.animate().alpha(0f).setDuration(300).start();
-            heroArt.animate().alpha(0f).setDuration(300).start();
+            if (!tvosShell) heroArt.animate().alpha(0f).setDuration(300).start();
         } else {
             hero.setAlpha(0f);
             ambient.setAlpha(0f);
-            heroArt.setAlpha(0f);
+            if (!tvosShell) heroArt.setAlpha(0f);
         }
     }
 
@@ -1841,6 +3023,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                     rtlAppGrid, keyCode == KeyEvent.KEYCODE_DPAD_LEFT);
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+            if (adapter.isExploreAt(position) && exploreTabs != null && exploreInfo.getVisibility() == View.VISIBLE) {
+                if (!exploreLists[exploreTab].isEmpty()) enterCarousel(0);
+                else exploreTabs[exploreTab].requestFocus();
+                return true;
+            }
+            if (tvosShell && position < COLUMNS && currentShelfLink() != null) {
+                enterShelfMode();
+                return true;
+            }
             if (position < COLUMNS) return false;          // dock row: let focus move to the top bar
             target = position - COLUMNS;
         } else {
@@ -1972,7 +3163,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     private void updateClockVisibility() {
         boolean valid = System.currentTimeMillis() >= TIME_VALID_AFTER_MS;
-        clockBlock.setVisibility(valid ? View.VISIBLE : View.INVISIBLE);
+        clockBlock.setVisibility(valid && !tvosShell ? View.VISIBLE : View.INVISIBLE);
         handler.removeCallbacks(clockCheck);
         if (valid) {
             updateGreeting();
@@ -2270,7 +3461,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 }
             }
         }
-        btnInputs.setVisibility(any ? View.VISIBLE : View.GONE);
+        btnInputs.setVisibility(any && !tvosShell ? View.VISIBLE : View.GONE);
     }
 
     /** boot_to_live_tv: the first time Home comes up after the TV starts, open the Live TV app instead. Once per
@@ -2392,7 +3583,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             openSourcePanel();
             return;
         }
-        View anchor = findViewById(R.id.btnInputs);
+        View anchor = tvosShell && clockPill != null ? clockPill : findViewById(R.id.btnInputs);
         View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
         LinearLayout rows = panel.findViewById(R.id.rows);
 
@@ -2547,7 +3738,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
         popup.setWidth(Math.max(width, Math.min(panel.getMeasuredWidth(), (int) (360 * density))));
 
-        int alignment = getResources().getBoolean(R.bool.rtl_menu_bar) ? Gravity.END : Gravity.START;
+        int alignment = getResources().getBoolean(R.bool.rtl_menu_bar) || tvosShell ? Gravity.END : Gravity.START;
         dropIn(popup, panel, anchor, alignment);
         rows.getChildAt(0).requestFocus();
     }
@@ -2567,11 +3758,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** Drop in: fade and unfold from the top edge, hanging under the anchor pill. */
     private void dropIn(PopupWindow popup, View panel, View anchor, int gravity) {
+        // Not enough room below the anchor (a tile in the last row): open upwards, ending just above it.
+        panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        int h = panel.getMeasuredHeight(), gap = (int) (10 * density);
+        int[] at = new int[2];
+        anchor.getLocationInWindow(at);
+        boolean up = at[1] + anchor.getHeight() + gap + h > root.getHeight() && at[1] - gap - h >= 0;
         panel.setAlpha(0f);
-        panel.setPivotY(0f);
+        panel.setPivotY(up ? h : 0f);
         panel.setScaleY(0.92f);
-        panel.setTranslationY(-8 * density);
-        popup.showAsDropDown(anchor, 0, (int) (10 * density), gravity);
+        panel.setTranslationY((up ? 8 : -8) * density);
+        popup.showAsDropDown(anchor, 0, up ? -(anchor.getHeight() + gap + h) : gap, gravity);
         panel.animate().alpha(1f).scaleY(1f).translationY(0f).setDuration(reducedMotion ? Motion.REDUCED_MS : 220)
                 .setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f)).start();
     }

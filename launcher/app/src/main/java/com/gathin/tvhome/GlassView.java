@@ -3,7 +3,9 @@ package com.gathin.tvhome;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.LinearGradient;
+import android.graphics.Matrix;
 import android.graphics.Paint;
+import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.util.AttributeSet;
@@ -19,9 +21,14 @@ public class GlassView extends View {
     private final Paint specular = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** tvOS 18 UI Kit "IconShine": a soft white ellipse just over the focused icon's top edge. */
+    private final Paint shine = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Matrix shineMatrix = new Matrix();
     private final RectF rect = new RectF();
     private final float density;
     private float radius;
+    /** tvOS shell: only a faint halo in the icon's colour around the focused icon; no slab, rim or shine on it. */
+    private boolean plain;
     /** Glow colour as 0xRRGGBB: white normally, a festival's accent (diya gold) while a festive skin is on. */
     private int glowRgb = 0xFFFFFF;
     /** Glow strength: the white glow stays faint, a coloured one needs more alpha to read as warm light. */
@@ -58,6 +65,11 @@ public class GlassView extends View {
         invalidate();
     }
 
+    void setPlain(boolean on) {
+        plain = on;
+        invalidate();
+    }
+
     void setRadius(float px) {
         radius = px;
         invalidate();
@@ -68,12 +80,36 @@ public class GlassView extends View {
         super.onSizeChanged(w, h, oldw, oldh);
         fill.setShader(new LinearGradient(0, 0, 0, h, 0x3DFFFFFF, 0x12FFFFFF, Shader.TileMode.CLAMP));
         specular.setShader(new LinearGradient(0, 0, 0, h * 0.45f, 0x66FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
+        // The kit's shine is a 199x64 ellipse at 69% white under a wide blur, centred on a 303px icon's top edge. A
+        // radial gradient squashed to the same 3:1 ellipse gives that falloff with no blur pass.
+        float rx = w * 0.5f;
+        RadialGradient g = new RadialGradient(0, 0, rx, new int[]{0x59FFFFFF, 0x1FFFFFFF, 0x00FFFFFF},
+                new float[]{0f, 0.45f, 1f}, Shader.TileMode.CLAMP);
+        shineMatrix.setScale(1f, 0.32f);
+        shineMatrix.postTranslate(w / 2f, 6f * density);
+        g.setLocalMatrix(shineMatrix);
+        shine.setShader(g);
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
         float inset = 6f * density;   // room for the glow
         rect.set(inset, inset, getWidth() - inset, getHeight() - inset);
+        if (plain) {
+            // tvOS: no shine or slab over the icon, only a faint halo in its colour just outside its edge (the lifted
+            // tile's own elevation adds the shadow under it). Drawn outside the icon, so the icon stays untouched.
+            int rings = 10;
+            float step = inset / rings;
+            glow.setStrokeWidth(step + 0.5f);
+            int alpha = Math.round(glowAlpha * 0.55f);
+            for (int i = 0; i < rings; i++) {
+                float o = step * (i + 0.5f);
+                float t = 1f - (float) i / rings;
+                glow.setColor(Math.round(alpha * t * t) << 24 | glowRgb);
+                canvas.drawRoundRect(rect.left - o, rect.top - o, rect.right + o, rect.bottom + o, radius + o, radius + o, glow);
+            }
+            return;
+        }
 
         // Outer glow: thin rings across the inset, each a little fainter, so it fades out smoothly. Three wide
         // strokes left visible bands once the glow took an app's colour at a stronger alpha. The hardware layer
@@ -95,6 +131,7 @@ public class GlassView extends View {
         canvas.save();
         canvas.clipRect(rect.left, rect.top, rect.right, rect.top + rect.height() * 0.45f);
         canvas.drawRoundRect(rect, radius, radius, specular);
+        canvas.drawRoundRect(rect, radius, radius, shine);
         canvas.restore();
 
         canvas.drawRoundRect(rect, radius, radius, rim);

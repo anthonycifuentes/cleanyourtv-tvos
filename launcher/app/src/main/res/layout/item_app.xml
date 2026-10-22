@@ -52,7 +52,7 @@
     <TextView
         android:id="@+id/name"
         android:layout_width="180dp"
-        android:layout_height="22dp"
+        android:layout_height="26dp"
         android:layout_gravity="center_horizontal|top"
         android:layout_marginTop="108dp"
         android:gravity="center"
@@ -61,7 +61,7 @@
         android:alpha="0"
         android:translationY="-6dp"
         android:textColor="#F2FFFFFF"
-        android:textSize="14sp"
+        android:textSize="16sp"
         android:fontFamily="@font/outfit_medium"
         android:letterSpacing="0.02" />
 </FrameLayout>

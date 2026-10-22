@@ -17,6 +17,12 @@
     <!-- YaOS (Yandex TV OS): HDMI, AV and the tuner all play in com.yandex.tv.live, whose activities require
          this permission (protection level normal, so it is granted at install). Ignored on other TVs. -->
     <uses-permission android:name="yandex.tv.permission.ACCESS_TV_SOURCE" />
+    <!-- The Top Shelf (TopShelf): the artwork apps publish to preview channels and Continue watching. Granted by
+         build-and-install with pm grant, like the location permission above. -->
+    <uses-permission android:name="android.permission.READ_TV_LISTINGS" />
+    <!-- Top Shelf only: apps publish their artwork as https addresses. TopShelf fetches those pictures, for dock
+         apps, and caches them; nothing else in the launcher goes online. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Android 11+ package visibility: lets the launcher list the TV apps it shows as tiles, and the
          apps that declare a module card (docs/specs/card.md). -->

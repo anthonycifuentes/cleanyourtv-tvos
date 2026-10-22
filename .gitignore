@@ -5,6 +5,8 @@ launcher/.gradle/
 launcher/build/
 launcher/app/build/
 launcher/local.properties
+# your own TMDB key (Explore shelf)
+launcher/tmdb.properties
 # your own TV's dumps (serial, android_id, device names) stay local
 backup/
 # session screenshots and working notes (may show the Wi-Fi name or account avatar) stay local
@@ -17,3 +19,10 @@ work/
 *.aab
 launcher/hs_err_pid*.log
 launcher/replay_pid*.log
+
+# Your own pictures for the tvOS shell (docs/tvos-shell.md): wallpapers, shelf art, the Home tile and your avatar
+launcher/app/src/main/res/drawable-nodpi/rest_*
+launcher/app/src/main/res/drawable-nodpi/shelf_*
+launcher/app/src/main/res/drawable-nodpi/banner_home.*
+launcher/app/src/main/res/drawable-nodpi/banner_xuper.*
+launcher/app/src/main/res/drawable-nodpi/avatar_photo.*

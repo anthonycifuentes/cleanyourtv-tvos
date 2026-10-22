@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- app_banners names drawables at run time, which resource shrinking cannot see: keep every banner_*. -->
+<!-- app_banners, shelf_art and the tvOS shell's own pictures (rest_*, avatar_photo, banner_home) name drawables at run time, which resource shrinking cannot see: keep every banner_*
+     and shelf_*. -->
 <resources xmlns:tools="http://schemas.android.com/tools"
-    tools:keep="@drawable/banner_*" />
+    tools:keep="@drawable/banner_*,@drawable/shelf_*,@drawable/rest_*,@drawable/avatar_photo" />
